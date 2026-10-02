@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/anacrolix/torrent/bencode"
 )
 
 var (
@@ -101,7 +98,7 @@ func lintIA(client *http.Client, e entry) []string {
 	fetchErrors := make([]error, len(ids))
 	totalZips := 0
 	for i, id := range ids {
-		data, err := iaFetch(client, "https://archive.org/metadata/"+id)
+		data, err := fetch(client, "https://archive.org/metadata/"+id)
 		if err != nil {
 			fetchErrors[i] = fmt.Errorf("Failed to fetch metadata: %w", err)
 			continue
@@ -180,11 +177,7 @@ func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, torr
 	case !present:
 		errors = append(errors, "Missing 'ctlogsize' metadata")
 	default:
-		const entriesPerZip = 256 * 256 * 256
-		expectedZips := logSize / entriesPerZip
-		if logSize%entriesPerZip > 0 {
-			expectedZips++
-		}
+		expectedZips := zipCount(logSize)
 		if int64(totalZips) != expectedZips {
 			errors = append(errors, fmt.Sprintf(
 				"Expected %d zip files across all items based on ctlogsize %d, found %d",
@@ -212,119 +205,24 @@ func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, torr
 				firstZip = "000.zip"
 			}
 			baseURL := "https://archive.org/download/" + id + "/" + firstZip
-			data, err := iaFetch(client, baseURL+"/log.v3.json")
-			if err != nil {
-				errors = append(errors, fmt.Sprintf("Failed to fetch log.v3.json: %v", err))
-			} else {
-				var logJSON struct {
-					LogID         *string `json:"log_id"`
-					URL           string  `json:"url"`
-					SubmissionURL string  `json:"submission_url"`
-					MonitoringURL string  `json:"monitoring_url"`
-				}
-				if err := json.Unmarshal(data, &logJSON); err != nil || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-					if err == nil {
-						err = fmt.Errorf("expected an object")
-					}
-					errors = append(errors, fmt.Sprintf("Invalid JSON in log.v3.json: %v", err))
-				} else {
-					actualID := "None"
-					if logJSON.LogID != nil {
-						actualID = *logJSON.LogID
-					}
-					if logID != "" && (logJSON.LogID == nil || *logJSON.LogID != logID) {
-						errors = append(errors, fmt.Sprintf(
-							"log.v3.json log_id '%s' does not match metadata ctlogid '%s'", actualID, logID))
-					}
-					if ctURL != "" {
-						if actual, expected := strings.TrimRight(logJSON.URL, "/"), strings.TrimRight(ctURL, "/"); actual != expected {
-							errors = append(errors, fmt.Sprintf(
-								"log.v3.json url '%s' does not match metadata cturl '%s'", actual, expected))
-						}
-					} else {
-						if actual, expected := strings.TrimRight(logJSON.SubmissionURL, "/"), strings.TrimRight(submissionURL, "/"); submissionURL != "" && actual != expected {
-							errors = append(errors, fmt.Sprintf(
-								"log.v3.json submission_url '%s' does not match metadata ctsubmissionurl '%s'", actual, expected))
-						}
-						if actual, expected := strings.TrimRight(logJSON.MonitoringURL, "/"), strings.TrimRight(monitoringURL, "/"); monitoringURL != "" && actual != expected {
-							errors = append(errors, fmt.Sprintf(
-								"log.v3.json monitoring_url '%s' does not match metadata ctmonitoringurl '%s'", actual, expected))
-						}
-					}
-				}
+			expected := logInfo{
+				LogID: &logID, URL: ctURL, SubmissionURL: submissionURL, MonitoringURL: monitoringURL,
 			}
-			data, err = iaFetch(client, baseURL+"/checkpoint")
-			if err != nil {
-				errors = append(errors, fmt.Sprintf("Failed to fetch checkpoint: %v", err))
-			} else {
-				lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-				if len(lines) < 2 {
-					errors = append(errors, "Invalid checkpoint format (expected at least 2 lines)")
-				} else {
-					originURL := submissionURL
-					if originURL == "" {
-						originURL = ctURL
-					}
-					expectedOrigin := strings.TrimRight(strings.ReplaceAll(originURL, "https://", ""), "/")
-					if originURL != "" && lines[0] != expectedOrigin {
-						errors = append(errors, fmt.Sprintf(
-							"checkpoint origin '%s' does not match URL metadata '%s'", lines[0], expectedOrigin))
-					}
-					if present && sizeErr == nil && logSize != 0 {
-						checkpointSize, err := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64)
-						if err != nil {
-							errors = append(errors, "Invalid checkpoint size: "+lines[1])
-						} else if checkpointSize != logSize {
-							errors = append(errors, fmt.Sprintf(
-								"checkpoint size %s does not match ctlogsize %d", lines[1], logSize))
-						}
-					}
-				}
+			var expectedSize *int64
+			if present && sizeErr == nil && logSize != 0 {
+				expectedSize = &logSize
 			}
+			errors = append(errors, lintMetadata(httpFiles(client, baseURL), expected, expectedSize)...)
 		}
 	}
 
-	if torrentURL != "" {
-		data, err := iaFetch(client, torrentURL)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to fetch torrent: %v", err))
-		} else if files, err := iaTorrentFiles(data); err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to parse torrent: %v", err))
-		} else {
-			missingSet := make(map[string]bool)
-			for _, file := range item.Files {
-				if file.Source == "original" && file.Name != "" && !strings.HasSuffix(file.Name, "_files.xml") && !files[file.Name] {
-					missingSet[file.Name] = true
-				}
-			}
-			missing := make([]string, 0, len(missingSet))
-			for name := range missingSet {
-				missing = append(missing, name)
-			}
-			slices.Sort(missing)
-			if len(missing) != 0 {
-				suffix := ""
-				if len(missing) > 5 {
-					suffix = " ..."
-				}
-				errors = append(errors, fmt.Sprintf("Torrent is missing %d files: %s%s",
-					len(missing), strings.Join(missing[:min(5, len(missing))], ", "), suffix))
-			}
+	var originalFiles []string
+	for _, file := range item.Files {
+		if file.Source == "original" && file.Name != "" && !strings.HasSuffix(file.Name, "_files.xml") {
+			originalFiles = append(originalFiles, file.Name)
 		}
 	}
-	return errors
-}
-
-func iaFetch(client *http.Client, url string) ([]byte, error) {
-	response, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
-	}
-	return io.ReadAll(response.Body)
+	return append(errors, lintTorrent(client, torrentURL, originalFiles)...)
 }
 
 // iaLogSize preserves integer precision for both JSON integers and strings.
@@ -359,32 +257,4 @@ func iaLogSize(raw json.RawMessage) (size int64, present bool, err error) {
 	}
 	// Zero as a number is false in Python, while the string "0" is true.
 	return size, size != 0, nil
-}
-
-// Only the file list matters here; do not impose tracker, hash, or other
-// metainfo validation that the Python linter does not perform.
-func iaTorrentFiles(data []byte) (map[string]bool, error) {
-	var torrent struct {
-		Info struct {
-			Name  string `bencode:"name"`
-			Files []struct {
-				Path []string `bencode:"path"`
-			} `bencode:"files"`
-		} `bencode:"info"`
-	}
-	if err := bencode.Unmarshal(data, &torrent); err != nil {
-		return nil, err
-	}
-	files := make(map[string]bool)
-	if torrent.Info.Files != nil {
-		for _, file := range torrent.Info.Files {
-			if file.Path == nil {
-				return nil, fmt.Errorf("torrent file has no path")
-			}
-			files[strings.Join(file.Path, "/")] = true
-		}
-	} else if torrent.Info.Name != "" {
-		files[torrent.Info.Name] = true
-	}
-	return files, nil
 }

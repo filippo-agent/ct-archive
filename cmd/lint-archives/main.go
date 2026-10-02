@@ -1,5 +1,5 @@
 // Command lint-archives checks a single archived Certificate Transparency log.
-// Currently only Internet Archive locations are supported.
+// It supports Internet Archive items and direct HTTP(S) archive prefixes.
 package main
 
 import (
@@ -51,6 +51,8 @@ func lintArchive(client *http.Client, e entry) (diagnostics []string, supported 
 	// Match anywhere so malformed formatting around IA links still gets checked.
 	case strings.Contains(e.location, "https://archive.org/details/"):
 		return lintIA(client, e), true
+	case strings.HasPrefix(e.location, "https://"), strings.HasPrefix(e.location, "http://"):
+		return lintPrefix(client, e), true
 	default:
 		return nil, false
 	}
