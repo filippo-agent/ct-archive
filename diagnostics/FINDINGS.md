@@ -55,9 +55,10 @@ prefix transmissions and the peer's later timeout close.
 
 ## Controls that discriminate competing explanations
 
-All variants within a job used fresh connections, one pinned IPv4 address
-(`145.116.0.213`), and the same SNI (`dn760103.eu.archive.org`). Trials were
-interleaved and repeated in reverse order.
+All variants within a job used fresh connections and one pinned IPv4 address
+(`145.116.0.213`). TLS variants retained SNI `dn760103.eu.archive.org`;
+plaintext requests used that same hostname in the HTTP Host header. Trials
+were interleaved and repeated in reverse order.
 
 | Control | Observation | What it establishes |
 |---|---|---|
