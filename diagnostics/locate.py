@@ -3,7 +3,7 @@
 ICMP quotes are joined to socket ports; pcap remains the authority for wire sizes.
 Run as root only for the ICMP listener. No raw packet injection.
 """
-import argparse, json, socket, struct, threading, time
+import argparse, json, socket, struct, threading, time, sys
 p=argparse.ArgumentParser();p.add_argument('--ip',default='145.116.0.213');p.add_argument('--host',default='dn760103.eu.archive.org');p.add_argument('--max-ttl',type=int,default=28);p.add_argument('--wait',type=float,default=.65);a=p.parse_args()
 lock=threading.Lock();labels={};stop=False
 
@@ -29,7 +29,7 @@ def probe(ttl,n,port=443,df=True):
  label=dict(ttl=ttl,bytes=n,port=port,df=df)
  s=socket.socket();s.settimeout(3);s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
  # DONT (DF=0) or PROBE (DF=1, ignore a cached path MTU).
- s.setsockopt(socket.IPPROTO_IP,10,3 if df else 0)
+ if sys.platform.startswith("linux"):s.setsockopt(socket.IPPROTO_IP,10,3 if df else 0)
  start=time.time()
  try:
   s.connect((a.ip,port));addr=s.getsockname();labels[addr[1]]=label
@@ -43,12 +43,15 @@ def probe(ttl,n,port=443,df=True):
   emit(dict(kind='result',start=start,elapsed=time.time()-start,local=addr,probe=label,response=response,error=err))
  except OSError as e:emit(dict(kind='connect-error',probe=label,error=str(e)))
  finally:
-  s.setsockopt(socket.IPPROTO_IP,socket.IP_TTL,64);s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0));s.close()
+  try:
+   s.setsockopt(socket.IPPROTO_IP,socket.IP_TTL,64);s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
+  except OSError:pass
+  s.close()
  time.sleep(.08)
 try:
  # Size/DF/port controls before tracing, all on the same runner.
  for port in (443,80):
-  for df in (True,False):
+  for df in ((True,False) if sys.platform.startswith("linux") else (True,)):
    for n in (307,1438,1448):probe(64,n,port,df)
  for ttl in range(1,a.max_ttl+1):
   for n in (307,1448):probe(ttl,n)

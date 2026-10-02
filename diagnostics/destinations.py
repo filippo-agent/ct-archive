@@ -22,5 +22,7 @@ for host,ip in targets:
    s.sendall(data);r['response']=s.recv(4096)[:120].decode('ascii',errors='replace')
   except OSError as e:r['error']=str(e)
   finally:
-   s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0));s.close()
+   try:s.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
+   except OSError:pass
+   s.close()
   r['elapsed_ms']=int((time.time()-start)*1000);print(json.dumps(r),flush=True);time.sleep(.1)
