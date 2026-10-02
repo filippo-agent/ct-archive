@@ -25,14 +25,14 @@ func lintPrefix(client *http.Client, e entry) []string {
 	if n > 1000 {
 		return []string{fmt.Sprintf("checkpoint implies %d ZIPs; at most 1000 supported", n)}
 	}
-	objects := make(map[string]archiveObject)
+	objects := make(map[string]int64)
 	for i := int64(0); i < n; i++ {
 		name := fmt.Sprintf("%03d.zip", i)
 		size, err := headZip(client, baseURL+name)
 		if err != nil {
 			diagnostics = append(diagnostics, fmt.Sprintf("%s: %v", name, err))
 		}
-		objects[name] = archiveObject{URL: baseURL + name, Size: size}
+		objects[name] = size
 	}
 	readers := make(map[int64]fileReader)
 	openZip := func(index int64) (fileReader, error) {

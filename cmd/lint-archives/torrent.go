@@ -1,52 +1,31 @@
 package main
 
 import (
-	"bytes"
-	"crypto/sha1"
-	"errors"
+	"bufio"
 	"fmt"
+	"io"
 	"math"
-	"math/rand/v2"
 	"net/http"
-	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-// archiveObject is supplied by the archive inventory, never by the torrent.
-// URL already has its path encoded; Size is -1 when metadata/HEAD cannot tell.
-type archiveObject struct {
-	URL  string
-	Size int64
-}
-
-const torrentPieceLimit = 16 << 20
-
-var torrentNumberedZip = regexp.MustCompile(`^[0-9]{3}\.zip$`)
-
-func lintTorrentObjects(client *http.Client, url string, objects map[string]archiveObject) []string {
+// Compare torrent metadata with inventory sizes (-1 means unknown), without
+// downloading ZIP pieces or validating the unread torrent suffix.
+func lintTorrentObjects(client *http.Client, url string, sizes map[string]int64) []string {
 	if url == "" {
 		return nil
 	}
-	data, err := fetch(client, url)
+	info, pieceBytes, err := fetchTorrentPrefix(client, url)
 	if err != nil {
-		return []string{fmt.Sprintf("Failed to fetch torrent: %v", err)}
-	}
-	mi, err := metainfo.Load(bytes.NewReader(data))
-	if err != nil {
-		return []string{fmt.Sprintf("Failed to parse torrent: %v", err)}
-	}
-	info, err := mi.UnmarshalInfo()
-	if err != nil {
-		return []string{fmt.Sprintf("Failed to parse torrent info: %v", err)}
+		return []string{fmt.Sprintf("Failed to read torrent metadata prefix: %v", err)}
 	}
 
 	var diagnostics []string
-	if !info.HasV1() {
-		return []string{"Torrent has no v1 file/piece layout"}
-	}
 	if !torrentSafePath([]string{info.Name}) ||
 		(info.NameUtf8 != "" && !torrentSafePath([]string{info.NameUtf8})) {
 		diagnostics = append(diagnostics, "Torrent has an unsafe or empty name")
@@ -57,16 +36,10 @@ func lintTorrentObjects(client *http.Client, url string, objects map[string]arch
 	if info.Files != nil && len(info.Files) == 0 {
 		diagnostics = append(diagnostics, "Torrent has an empty multi-file layout")
 	}
-	switch {
-	case info.PieceLength <= 0:
+	if info.PieceLength <= 0 {
 		diagnostics = append(diagnostics, "Torrent piece length must be positive")
-	case info.PieceLength > torrentPieceLimit:
-		// Do not silently imply a piece was checked, or download an unbounded
-		// piece. The archive torrents currently use at most 16 MiB pieces.
-		diagnostics = append(diagnostics, fmt.Sprintf(
-			"Torrent piece length %d exceeds the supported sampling limit %d", info.PieceLength, torrentPieceLimit))
 	}
-	if len(info.Pieces)%sha1.Size != 0 {
+	if pieceBytes%20 != 0 {
 		diagnostics = append(diagnostics, "Torrent piece hashes are not a multiple of 20 bytes")
 	}
 
@@ -87,12 +60,12 @@ func lintTorrentObjects(client *http.Client, url string, objects map[string]arch
 			diagnostics = append(diagnostics, fmt.Sprintf("Torrent repeats file %q", name))
 		}
 		seen[name] = true
-		object, listed := objects[name]
-		if listed && object.Size < -1 {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s: invalid expected object size %d", name, object.Size))
-		} else if listed && object.Size >= 0 && file.Length != object.Size {
+		size, listed := sizes[name]
+		if listed && size < -1 {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s: invalid expected object size %d", name, size))
+		} else if listed && size >= 0 && file.Length != size {
 			diagnostics = append(diagnostics, fmt.Sprintf(
-				"%s: torrent length %d differs from object size %d", name, file.Length, object.Size))
+				"%s: torrent length %d differs from object size %d", name, file.Length, size))
 		}
 		if file.Length < 0 || file.Length > math.MaxInt64-total {
 			diagnostics = append(diagnostics, fmt.Sprintf("%s: negative torrent length or total length overflow", name))
@@ -106,13 +79,13 @@ func lintTorrentObjects(client *http.Client, url string, objects map[string]arch
 		if total%info.PieceLength != 0 {
 			count++
 		}
-		if count != int64(len(info.Pieces)/sha1.Size) {
+		if count != pieceBytes/20 {
 			diagnostics = append(diagnostics, fmt.Sprintf(
-				"Torrent has %d piece hashes, expected %d for %d bytes", len(info.Pieces)/sha1.Size, count, total))
+				"Torrent has %d piece hashes, expected %d for %d bytes", pieceBytes/20, count, total))
 		}
 	}
 	var missing []string
-	for name := range objects {
+	for name := range sizes {
 		if !seen[name] {
 			missing = append(missing, name)
 		}
@@ -125,89 +98,6 @@ func lintTorrentObjects(client *http.Client, url string, objects map[string]arch
 		}
 		diagnostics = append(diagnostics, fmt.Sprintf("Torrent is missing %d files: %s%s",
 			len(missing), strings.Join(missing[:min(5, len(missing))], ", "), suffix))
-	}
-	// Unknown object sizes and unlisted files are valid here: prefix inventories
-	// need only list required ZIPs. Neither can supply URLs or sampling bytes.
-	if len(diagnostics) != 0 || total == 0 {
-		return diagnostics
-	}
-	type sampleRange struct {
-		name         string
-		offset       int64 // File start in the concatenated v1 stream.
-		first, count int64 // Fully contained global piece indices.
-	}
-	var candidates []sampleRange
-	var start, eligible int64
-	for _, file := range files {
-		end := start + file.Length
-		name := strings.Join(file.BestPath(), "/")
-		object, listed := objects[name]
-		if listed && object.Size == file.Length && object.URL != "" &&
-			torrentNumberedZip.MatchString(name) && file.Length > 0 {
-			// Choose uniformly among eligible pieces, not files. Only pieces
-			// wholly inside a known numbered ZIP qualify, avoiding cross-file
-			// probes and tiny attachments. One suffix probe plus one piece
-			// bounds successful payloads to 16 MiB+1, without any ZIP parsing.
-			// Piece reads use <=1 MiB chunks so each gets its own client
-			// timeout, rather than timing the entire large piece transfer.
-			first := start / info.PieceLength
-			if start%info.PieceLength != 0 {
-				first++
-			}
-			last := end / info.PieceLength
-			if end == total && total%info.PieceLength != 0 {
-				last++ // Include the short last piece only if contained here.
-			}
-			if last > first {
-				candidates = append(candidates, sampleRange{name, start, first, last - first})
-				eligible += last - first
-			}
-		}
-		start = end
-	}
-	if eligible == 0 {
-		// No fully contained known ZIP piece: keep metadata checks only.
-		return diagnostics
-	}
-	choice := rand.Int64N(eligible)
-	for _, candidate := range candidates {
-		if choice >= candidate.count {
-			choice -= candidate.count
-			continue
-		}
-		piece := candidate.first + choice
-		globalOffset := piece * info.PieceLength
-		offset := globalOffset - candidate.offset
-		length := min(info.PieceLength, total-globalOffset)
-		object := objects[candidate.name]
-		r := &rangeZipReaderAt{client: client, url: object.URL, size: object.Size}
-		context := fmt.Sprintf("%s: torrent piece %d at offset %d", candidate.name, piece, offset)
-		if _, err := r.fetchRange(0, 1, true); err != nil {
-			if errors.Is(err, errRangeUnsupported) {
-				// A 200 is closed unread; never fall back to a full ZIP GET.
-				return diagnostics
-			}
-			return append(diagnostics, fmt.Sprintf("%s: Range probe: %v", context, err))
-		}
-		if r.size != object.Size {
-			return append(diagnostics, fmt.Sprintf(
-				"%s: Range total %d differs from object/torrent length %d", context, r.size, object.Size))
-		}
-		hash := sha1.New()
-		for read := int64(0); read < length; {
-			chunkOffset := offset + read
-			chunkLength := min(int64(rangeZipWindowSize), length-read)
-			data, err := r.fetchRange(chunkOffset, chunkLength, false)
-			if err != nil {
-				return append(diagnostics, fmt.Sprintf("%s: chunk at offset %d: %v", context, chunkOffset, err))
-			}
-			hash.Write(data)
-			read += chunkLength
-		}
-		if !bytes.Equal(hash.Sum(nil), info.Pieces[piece*sha1.Size:(piece+1)*sha1.Size]) {
-			return append(diagnostics, fmt.Sprintf("%s: SHA-1 does not match torrent piece hash", context))
-		}
-		break
 	}
 	return diagnostics
 }
@@ -227,4 +117,131 @@ func torrentSafePath(parts []string) bool {
 		}
 	}
 	return true
+}
+
+const torrentPrefixLimit = 1 << 20
+
+// Stop at info.pieces instead of downloading its potentially huge hash array
+// or any ZIP payloads. Bencoded dictionary keys are sorted, so the v1 file list, names,
+// lengths, and piece length all precede pieces. The unread suffix is not
+// validated: only its declared piece count is checked against the file sizes.
+func fetchTorrentPrefix(client *http.Client, url string) (metainfo.Info, int64, error) {
+	var info metainfo.Info
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return info, 0, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", torrentPrefixLimit-1))
+	req.Header.Set("Accept-Encoding", "identity")
+	response, err := client.Do(req)
+	if err != nil {
+		return info, 0, err
+	}
+	defer response.Body.Close()
+	total := response.ContentLength
+	switch response.StatusCode {
+	case http.StatusOK: // Range ignored: still stop reading at pieces or the cap.
+	case http.StatusPartialContent:
+		ranges := response.Header.Values("Content-Range")
+		if len(ranges) != 1 {
+			return info, 0, fmt.Errorf("expected one Content-Range")
+		}
+		m := rangeZipContentRange.FindStringSubmatch(ranges[0])
+		if m == nil {
+			return info, 0, fmt.Errorf("invalid Content-Range %q", ranges[0])
+		}
+		start, e1 := strconv.ParseInt(m[1], 10, 64)
+		end, e2 := strconv.ParseInt(m[2], 10, 64)
+		size, e3 := strconv.ParseInt(m[3], 10, 64)
+		if e1 != nil || e2 != nil || e3 != nil || start != 0 || size <= 0 || end != min(size, torrentPrefixLimit)-1 ||
+			(response.ContentLength >= 0 && response.ContentLength != end+1) {
+			return info, 0, fmt.Errorf("invalid Content-Range or length for torrent prefix")
+		}
+		total = size
+	default:
+		return info, 0, fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	if response.Uncompressed || response.Header.Get("Content-Encoding") != "" {
+		return info, 0, fmt.Errorf("expected an unencoded torrent prefix")
+	}
+	limited := &io.LimitedReader{R: response.Body, N: torrentPrefixLimit}
+	r := bufio.NewReader(limited)
+	if _, err := torrentDictionaryPrefix(r, "info"); err != nil {
+		return info, 0, err
+	}
+	fields, err := torrentDictionaryPrefix(r, "pieces")
+	if err != nil {
+		return info, 0, err
+	}
+	_, files := fields["files"]
+	_, length := fields["length"]
+	if files == length {
+		return info, 0, fmt.Errorf("torrent needs exactly one of files or length")
+	}
+	// Keep field/type decoding in the existing bencode/metainfo library. No
+	// piece-hash string is fabricated or allocated, regardless of its size.
+	encoded, err := bencode.Marshal(fields)
+	if err != nil {
+		return info, 0, err
+	}
+	if err := bencode.Unmarshal(encoded, &info); err != nil {
+		return info, 0, err
+	}
+	var digits []byte
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return info, 0, fmt.Errorf("read pieces length: %w", err)
+		}
+		if b == ':' {
+			break
+		}
+		if b < '0' || b > '9' || len(digits) == 19 {
+			return info, 0, fmt.Errorf("invalid pieces string length")
+		}
+		digits = append(digits, b)
+	}
+	pieceBytes, err := strconv.ParseInt(string(digits), 10, 64)
+	if err != nil || (len(digits) > 1 && digits[0] == '0') {
+		return info, 0, fmt.Errorf("invalid pieces string length")
+	}
+	consumed := torrentPrefixLimit - limited.N - int64(r.Buffered())
+	if total >= 0 && (consumed > total-2 || pieceBytes > total-consumed-2) {
+		return info, 0, fmt.Errorf("declared pieces string does not fit in torrent")
+	}
+	return info, pieceBytes, nil
+}
+
+// Read complete key/value pairs up to stop, leaving its value unread. This is
+// a dictionary boundary walk, not a byte search: comments and other strings can
+// themselves contain "info" or "pieces". The library decodes keys and values.
+func torrentDictionaryPrefix(r *bufio.Reader, stop string) (map[string]bencode.Bytes, error) {
+	if marker, err := r.ReadByte(); err != nil || marker != 'd' {
+		return nil, fmt.Errorf("expected dictionary containing %q", stop)
+	}
+	decoder := bencode.NewDecoder(r)
+	decoder.MaxStrLen = torrentPrefixLimit
+	fields := make(map[string]bencode.Bytes)
+	previous := ""
+	for {
+		var key string
+		if err := decoder.Decode(&key); err != nil {
+			return nil, fmt.Errorf("torrent prefix (limit %d bytes): %w", torrentPrefixLimit, err)
+		}
+		if len(fields) > 0 && key <= previous {
+			return nil, fmt.Errorf("unsorted or duplicate torrent key %q", key)
+		}
+		if key == stop {
+			return fields, nil
+		}
+		if key > stop {
+			return nil, fmt.Errorf("missing torrent key %q before %q", stop, key)
+		}
+		var value bencode.Bytes
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("torrent prefix (limit %d bytes): %w", torrentPrefixLimit, err)
+		}
+		fields[key] = value
+		previous = key
+	}
 }

@@ -7,7 +7,6 @@ import (
 	"golang.org/x/mod/sumdb/tlog"
 	"math"
 	"net/http"
-	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -220,7 +219,7 @@ func lintIA(client *http.Client, e entry) []string {
 	}
 	errors = append(errors, lintTileSamples(openZip, tlog.Tree{N: cp.Size, Hash: cp.Hash}, e.allowMissingIssuers)...)
 	// IA's torrent covers originals in the base item, not its extensions.
-	objects := make(map[string]archiveObject)
+	objects := make(map[string]int64)
 	for _, file := range items[0].Files {
 		if file.Source != "original" || file.Name == "" || strings.HasSuffix(file.Name, "_files.xml") {
 			continue
@@ -232,7 +231,7 @@ func lintIA(client *http.Client, e entry) []string {
 			errors = append(errors, "Invalid IA file size for "+file.Name)
 			size = -1
 		}
-		objects[file.Name] = archiveObject{URL: "https://archive.org/download/" + ids[0] + "/" + url.PathEscape(file.Name), Size: size}
+		objects[file.Name] = size
 	}
 	errors = append(errors, lintTorrentObjects(client, e.torrentURL, objects)...)
 
