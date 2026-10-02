@@ -16,7 +16,6 @@ jobs:
         with:
           go-version-file: go.mod
 
-
       - name: Lint archive entries
         env:
           # IA's EU download endpoint can stall with ML-KEM on GitHub runners.

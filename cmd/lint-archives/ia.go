@@ -73,7 +73,7 @@ type iaMetadata struct {
 func lintIA(client *http.Client, e entry) []string {
 	matches := iaIDPattern.FindAllStringSubmatch(e.location, -1)
 	if len(matches) == 0 {
-		return nil
+		return []string{"No Internet Archive item identifier found in URL"}
 	}
 	ids := make([]string, len(matches))
 	locations := make([]string, len(matches))
