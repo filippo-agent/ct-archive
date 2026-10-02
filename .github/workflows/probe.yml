@@ -4,31 +4,38 @@ jobs:
   probe:
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [ubuntu-latest, macos-14]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-      - name: Compare destinations and runner networks
+      - name: Bound network controls and collect runner region
         shell: bash
         run: |
           mkdir -p evidence
+          echo 'environment'
           { date -u; uname -a; ifconfig || true; netstat -rn; } > evidence/environment.txt
+          curl -4fsS --max-time 10 https://api.ipify.org > evidence/egress-ip.txt || true
           if [[ $(uname) == Linux ]]; then
+            curl -fsS --max-time 3 --noproxy '*' -H Metadata:true 'http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text' > evidence/region.txt || true
             sudo ethtool -K eth0 tso off gso off gro off || true
             for iface in /sys/class/net/eth0/lower_*; do sudo ethtool -K "${iface##*lower_}" tso off gso off gro off || true; done
             dev=eth0
           else
             dev=$(route -n get 145.116.0.213 | awk '/interface:/{print $2}')
           fi
-          filter=$(python3 diagnostics/destinations.py --filter)
-          sudo tcpdump -i "$dev" -s 0 -U -w evidence/destinations.pcap "$filter" > evidence/tcpdump.log 2>&1 &
+          echo 'resolve'
+          python3 diagnostics/destinations.py --hosts dn760102.eu.archive.org,dn760103.eu.archive.org,dn760104.eu.archive.org,azure-sweet.exe.xyz --targets-file evidence/targets.json --resolve --filter > evidence/filter.txt
+          echo 'capture'
+          sudo sh -c 'echo $$ > evidence/tcpdump.pid; exec tcpdump -i "$1" -s 0 -U -w evidence/destinations.pcap "$2"' sh "$dev" "$(cat evidence/filter.txt)" > evidence/tcpdump.log 2>&1 &
           cap=$!
-          trap 'sudo kill -INT "$cap" || true; wait "$cap" || true' EXIT
+          trap 'sudo kill -INT "$(cat evidence/tcpdump.pid)" || true; sleep 1; sudo kill -TERM "$(cat evidence/tcpdump.pid)" 2>/dev/null || true' EXIT
           sleep 1
-          python3 diagnostics/destinations.py | tee evidence/destinations.jsonl
+          echo 'probe'
+          python3 -u diagnostics/destinations.py --targets-file evidence/targets.json --sizes 307,1438,1439,1448,2048 | tee evidence/destinations.jsonl
+          echo 'probe finished'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ia-destinations-${{ matrix.os }}
+          name: ia-neighbors-${{ matrix.os }}
           path: evidence/
