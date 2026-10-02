@@ -1,0 +1,28 @@
+name: IA TLS packet isolation
+on: push
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.4'
+      - name: Build and capture controlled handshakes
+        shell: bash
+        run: |
+          mkdir -p evidence
+          go build -o /tmp/ia-probe .
+          ip=$(getent ahostsv4 dn760103.eu.archive.org | awk 'NR==1{print $1}')
+          { date -u; go version; uname -a; ip addr; ip route; getent ahostsv4 dn760103.eu.archive.org; env | grep -i proxy || true; } > evidence/environment.txt
+          sudo tcpdump -i any -s 0 -U -w evidence/eu.pcap "host $ip and tcp port 443" > evidence/tcpdump.log 2>&1 &
+          cap=$!
+          trap 'sudo kill -INT "$cap" || true; wait "$cap" || true' EXIT
+          sleep 1
+          /tmp/ia-probe -ip "$ip" -rounds 3 | tee evidence/probe.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia-tls-evidence
+          path: evidence/
