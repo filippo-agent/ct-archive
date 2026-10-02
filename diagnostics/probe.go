@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,7 +26,17 @@ var host = flag.String("host", "dn760103.eu.archive.org", "TLS SNI and DNS name"
 var ip = flag.String("ip", "", "pin address; otherwise resolve once")
 var out = flag.String("out", "artifacts", "output directory")
 var rounds = flag.Int("rounds", 2, "interleaved repetitions")
+var timeout = flag.Duration("timeout", 10*time.Second, "per-connection deadline")
 var modes = flag.String("modes", "full-default,full-classic,raw-default,raw-classic,raw-classic-pad,full-default-mss900,full-default-recordsplit,raw-default-removehybrid", "ordered comma-separated variants")
+
+func parameter(mode, name string, fallback int) int {
+	m := regexp.MustCompile(name + `([0-9]+)`).FindStringSubmatch(mode)
+	if m == nil {
+		return fallback
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
 
 func u16(p []byte) int      { return int(binary.BigEndian.Uint16(p)) }
 func put16(p []byte, n int) { binary.BigEndian.PutUint16(p, uint16(n)) }
@@ -90,12 +102,13 @@ type event struct {
 }
 type wire struct {
 	net.Conn
-	prefix  string
-	events  *json.Encoder
-	first   bool
-	split   bool
-	written int
-	read    int
+	prefix   string
+	events   *json.Encoder
+	first    bool
+	split    bool
+	tcpsplit bool
+	written  int
+	read     int
 }
 
 func (w *wire) log(op string, n int, err error) {
@@ -109,6 +122,26 @@ func (w *wire) Write(p []byte) (int, error) {
 	if w.first {
 		w.first = false
 		os.WriteFile(w.prefix+"-clienthello.bin", p, 0644)
+		if w.tcpsplit {
+			total := 0
+			for total < len(p) {
+				end := total + 512
+				if end > len(p) {
+					end = len(p)
+				}
+				n, err := w.Conn.Write(p[total:end])
+				total += n
+				w.written += n
+				w.log("write-tcpsplit", n, err)
+				if err != nil {
+					return total, err
+				}
+				if total < len(p) {
+					time.Sleep(200 * time.Millisecond)
+				}
+			}
+			return total, nil
+		}
 		if w.split {
 			body := p[5:]
 			var records []byte
@@ -124,6 +157,7 @@ func (w *wire) Write(p []byte) (int, error) {
 				body = body[n:]
 			}
 			n, err := w.Conn.Write(records)
+			w.written += n
 			w.log("write-recordsplit", n, err)
 			if err != nil {
 				return 0, err
@@ -211,10 +245,12 @@ func main() {
 			c := config(strings.Contains(mode, "classic"))
 			c.KeyLogWriter = keys
 			dialer := net.Dialer{Timeout: 8 * time.Second}
-			if strings.Contains(mode, "mss900") {
+			if strings.Contains(mode, "mss") {
 				dialer.Control = func(network, address string, rc syscall.RawConn) error {
 					var e error
-					rc.Control(func(fd uintptr) { e = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 900) })
+					rc.Control(func(fd uintptr) {
+						e = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, parameter(mode, "mss", 900))
+					})
 					return e
 				}
 			}
@@ -225,19 +261,29 @@ func main() {
 				res["local"] = conn.LocalAddr().String()
 				res["remote"] = conn.RemoteAddr().String()
 				res["tcp_ms"] = time.Since(start).Milliseconds()
-				conn.SetDeadline(start.Add(10 * time.Second))
-				w := &wire{Conn: conn, prefix: prefix, events: json.NewEncoder(events), first: true, split: strings.Contains(mode, "recordsplit")}
+				conn.SetDeadline(start.Add(*timeout))
+				w := &wire{Conn: conn, prefix: prefix, events: json.NewEncoder(events), first: true, split: strings.Contains(mode, "recordsplit"), tcpsplit: strings.Contains(mode, "tcpsplit")}
 				if strings.HasPrefix(mode, "raw-") {
 					p := hello(strings.Contains(mode, "classic"))
-					if strings.Contains(mode, "pad") {
-						p = mutate(p, "pad", len(hello(false)))
+					if strings.Contains(mode, "http") {
+						p = []byte("GET / HTTP/1.0\r\nHost: " + *host + "\r\nX-Padding: ")
+						n := parameter(mode, "pad", len(hello(false)))
+						p = append(p, bytes.Repeat([]byte("a"), n-len(p)-4)...)
+						p = append(p, []byte("\r\n\r\n")...)
+					} else if strings.Contains(mode, "pad") {
+						p = mutate(p, "pad", parameter(mode, "pad", len(hello(false))))
 					}
 					if strings.Contains(mode, "removehybrid") {
 						p = mutate(p, "removehybrid", 0)
 					}
 					_, err = w.Write(p)
 					res["clienthello_bytes"] = len(p)
-					if err == nil {
+					if err == nil && strings.Contains(mode, "http") {
+						buf := make([]byte, 4096)
+						var n int
+						n, err = w.Read(buf)
+						res["response"] = string(buf[:n])
+					} else if err == nil {
 						hdr := make([]byte, 5)
 						_, err = io.ReadFull(w, hdr)
 						if err == nil {
@@ -256,6 +302,10 @@ func main() {
 						res["tls_version"] = s.Version
 						res["cipher"] = tls.CipherSuiteName(s.CipherSuite)
 						res["alpn"] = s.NegotiatedProtocol
+						if len(s.PeerCertificates) > 0 {
+							res["cert_subject"] = s.PeerCertificates[0].Subject.String()
+							res["cert_issuer"] = s.PeerCertificates[0].Issuer.String()
+						}
 						if v := reflect.ValueOf(s).FieldByName("CurveID"); v.IsValid() {
 							res["curve"] = fmt.Sprint(v.Interface())
 						}
