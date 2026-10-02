@@ -6,28 +6,21 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.4'
-      - name: Exact boundary and minimal reproducer
+      - name: Localize packet-size loss with established TCP TTL probes
         shell: bash
         run: |
           mkdir -p evidence
-          go build -o /tmp/ia-probe .
-          go build -o /tmp/ia-min ./cmd/min-repro
           ip=$(getent ahostsv4 dn760103.eu.archive.org | awk 'NR==1{print $1}')
-          { date -u; go version; uname -a; ip addr; ip route; ip route get "$ip"; sysctl net.ipv4.tcp_mtu_probing; } > evidence/environment.txt
+          { date -u; uname -a; ip addr; ip route; ip route get "$ip"; } > evidence/environment.txt
           sudo ethtool -K eth0 tso off gso off gro off
-          sudo ethtool -k eth0 > evidence/offloads.txt
-          sudo tcpdump -i eth0 -s 0 -U -w evidence/boundary.pcap "(host $ip and tcp port 443) or icmp" > evidence/tcpdump.log 2>&1 &
+          for iface in /sys/class/net/eth0/lower_*; do sudo ethtool -K "${iface##*lower_}" tso off gso off gro off || true; done
+          sudo tcpdump -i eth0 -s 0 -U -w evidence/locate.pcap "(host $ip and tcp) or icmp" > evidence/tcpdump.log 2>&1 &
           cap=$!
           trap 'sudo kill -INT "$cap" || true; wait "$cap" || true' EXIT
           sleep 1
-          /tmp/ia-probe -ip "$ip" -suite network -out evidence/exact | tee evidence/exact.log
-          { /tmp/ia-min -addr "$ip:443"; /tmp/ia-min -addr "$ip:443" -mss 1400; GODEBUG=tlsmlkem=0 /tmp/ia-min -addr "$ip:443"; } | tee evidence/minimal.log
-          { ping -n -c 1 -W 2 -M do -s 1400 "$ip" || true; ping -n -c 1 -W 2 -M do -s 1472 "$ip" || true; } > evidence/ping.txt
+          sudo python3 diagnostics/locate.py --ip "$ip" | tee evidence/locate.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ia-exact-boundary
+          name: ia-locate
           path: evidence/
