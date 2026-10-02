@@ -58,13 +58,15 @@ func lintPrefix(client *http.Client, e entry) []string {
 		// A server ignoring Range keeps standalone signature/metadata and HEAD
 		// checks. Never fall back to consuming its full ZIP response.
 		if _, err := openZip(0); err == nil {
-			diagnostics = append(diagnostics, lintTileSamples(openZip, tlog.Tree{N: cp.Size, Hash: cp.Hash}, e.allowMissingIssuers)...)
+			diagnostics = append(diagnostics, e.checkStage("tiles", func() []string {
+				return lintTileSamples(openZip, tlog.Tree{N: cp.Size, Hash: cp.Hash}, e.allowMissingIssuers)
+			})...)
 		} else if err != errRangeUnsupported {
 			diagnostics = append(diagnostics, fmt.Sprintf("000.zip: %v", err))
 		}
 	}
 	// Without a directory listing, HEAD cannot establish absence of extra ZIPs.
-	return append(diagnostics, lintTorrentObjects(client, e.torrentURL, objects)...)
+	return append(diagnostics, e.checkStage("torrent metadata", func() []string { return lintTorrentObjects(client, e.torrentURL, objects) })...)
 }
 
 func headZip(client *http.Client, url string) (int64, error) {

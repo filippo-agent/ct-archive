@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
+	"compress/flate"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -43,6 +45,11 @@ func openRangeZip(client *http.Client, url string) (*zip.Reader, error) {
 }
 
 func smallZipFiles(z *zip.Reader) fileReader {
+	// archive/zip confines this reader to the compressed member. Buffer only
+	// that member, not adjacent ZIP data, to avoid a GET per 4 KiB flate refill.
+	z.RegisterDecompressor(zip.Deflate, func(r io.Reader) io.ReadCloser {
+		return flate.NewReader(bufio.NewReaderSize(r, 64<<10))
+	})
 	return func(name string) ([]byte, error) {
 		for _, f := range z.File {
 			if f.Name != name {
@@ -62,15 +69,19 @@ func smallZipFiles(z *zip.Reader) fileReader {
 				return nil, fmt.Errorf("open ZIP member %q: %w", name, err)
 			}
 			defer member.Close()
-			// Read through EOF, including at the limit, so archive/zip checks
-			// the uncompressed size, data descriptor, and checksum.
-			data, err := io.ReadAll(io.LimitReader(member, rangeZipMemberLimit+1))
-			if err != nil {
+			// The validated size lets stored members be read in one request.
+			// Read one extra byte to reach EOF/checksum validation, or catch a
+			// member that decompresses beyond its declared bounded size.
+			data := make([]byte, int(f.UncompressedSize64)+1)
+			n, err := io.ReadFull(member, data)
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 				return nil, fmt.Errorf("read ZIP member %q: %w", name, err)
 			}
-			if len(data) > rangeZipMemberLimit {
-				return nil, fmt.Errorf("ZIP member %q exceeds %d bytes", name, rangeZipMemberLimit)
+			if uint64(n) != f.UncompressedSize64 {
+				return nil, fmt.Errorf("ZIP member %q has %d bytes, expected %d", name, n, f.UncompressedSize64)
 			}
+			data = data[:n]
+
 			// archive/zip can skip checking a zero CRC without a descriptor.
 			if crc32.ChecksumIEEE(data) != f.CRC32 {
 				return nil, fmt.Errorf("read ZIP member %q: %w", name, zip.ErrChecksum)

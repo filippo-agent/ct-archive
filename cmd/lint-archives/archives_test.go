@@ -18,6 +18,9 @@ func TestArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
+	// Archive.org's front door stalls under a burst of 60+ item requests.
+	// Admit IA work before starting any HTTP timeout; other hosts stay parallel.
+	iaSlots := make(chan struct{}, 8)
 	torrentLink := regexp.MustCompile(`\[\.torrent\]\(([^)]+)\)`)
 	entries := 0
 	for line := range strings.SplitSeq(string(readme), "\n") {
@@ -46,6 +49,15 @@ func TestArchives(t *testing.T) {
 			if !strings.Contains(e.location, "https://") && !strings.Contains(e.location, "http://") {
 				t.Skip("no archive URL")
 			}
+			if strings.Contains(e.location, "https://archive.org/details/") {
+				wait := time.Now()
+				iaSlots <- struct{}{}
+				defer func() { <-iaSlots }()
+				t.Logf("IA queue: %s", time.Since(wait).Round(time.Millisecond))
+			}
+			started := time.Now()
+			defer func() { t.Logf("active check: %s", time.Since(started).Round(time.Millisecond)) }()
+			e.logf = t.Logf
 			diagnostics, supported := lintArchive(client, e)
 			if !supported {
 				t.Skip("archive host not yet supported")

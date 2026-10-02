@@ -7,6 +7,7 @@ import (
 	"golang.org/x/mod/sumdb/tlog"
 	"math"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -53,6 +54,8 @@ type iaFile struct {
 }
 
 type iaItem struct {
+	Server   string          `json:"server"`
+	Dir      string          `json:"dir"`
 	Metadata json.RawMessage `json:"metadata"`
 	Files    []iaFile        `json:"files"`
 }
@@ -115,15 +118,23 @@ func lintIA(client *http.Client, e entry) []string {
 			}
 		}
 	}
+	missingInventory := false
 	for i, id := range ids {
 		if fetchErrors[i] != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", id, fetchErrors[i]))
-			continue
+			missingInventory = true
 		}
+	}
+	// An unavailable inventory is not evidence that its ZIPs are missing.
+	if missingInventory {
+		return errors
+	}
+	for i, id := range ids {
 		for _, diagnostic := range lintIAPart(id, items[i], totalZips) {
 			errors = append(errors, id+": "+diagnostic)
 		}
 	}
+
 	// Resolve numbered ZIPs across all parts and require exact, unique names.
 	zipOwners := make(map[string]int)
 	for i, item := range items {
@@ -141,7 +152,7 @@ func lintIA(client *http.Client, e entry) []string {
 	if !ok || rootOwner != 0 {
 		return append(errors, "No 000.zip found in base item")
 	}
-	rootRead := httpFiles(client, "https://archive.org/download/"+ids[0]+"/000.zip")
+	rootRead := iaFiles(client, items[0], ids[0], "000.zip")
 	info, cp, issues := readArchiveMetadata(rootRead, e.origin)
 	if len(issues) != 0 {
 		return append(errors, issues...)
@@ -172,7 +183,7 @@ func lintIA(client *http.Client, e entry) []string {
 		if !ok {
 			return nil, fmt.Errorf("missing %s", name)
 		}
-		read := httpFiles(client, "https://archive.org/download/"+ids[owner]+"/"+name)
+		read := iaFiles(client, items[owner], ids[owner], name)
 		zi, zc := info, cp
 		var issues []string
 		if index != 0 {
@@ -217,7 +228,9 @@ func lintIA(client *http.Client, e entry) []string {
 			errors = append(errors, fmt.Sprintf("%s: %v", names[0], err))
 		}
 	}
-	errors = append(errors, lintTileSamples(openZip, tlog.Tree{N: cp.Size, Hash: cp.Hash}, e.allowMissingIssuers)...)
+	errors = append(errors, e.checkStage("tiles", func() []string {
+		return lintTileSamples(openZip, tlog.Tree{N: cp.Size, Hash: cp.Hash}, e.allowMissingIssuers)
+	})...)
 	// IA's torrent covers originals in the base item, not its extensions.
 	objects := make(map[string]int64)
 	for _, file := range items[0].Files {
@@ -233,7 +246,7 @@ func lintIA(client *http.Client, e entry) []string {
 		}
 		objects[file.Name] = size
 	}
-	errors = append(errors, lintTorrentObjects(client, e.torrentURL, objects)...)
+	errors = append(errors, e.checkStage("torrent metadata", func() []string { return lintTorrentObjects(client, e.torrentURL, objects) })...)
 
 	return errors
 }
@@ -328,4 +341,18 @@ func iaLogSize(raw json.RawMessage) (size int64, present bool, err error) {
 	}
 	// Zero as a number is false in Python, while the string "0" is true.
 	return size, size != 0, nil
+}
+
+// The metadata API identifies the item's serving host and directory. Use its
+// extraction endpoint directly instead of asking archive.org to redirect every
+// small member request. Retain the public download URL if those fields are absent.
+func iaFiles(client *http.Client, item iaItem, id, zipName string) fileReader {
+	if !strings.HasSuffix(item.Server, ".archive.org") || strings.ContainsAny(item.Server, "/:@?# \t\r\n") ||
+		!strings.HasPrefix(item.Dir, "/") || !strings.HasSuffix(item.Dir, "/items/"+id) {
+		return httpFiles(client, "https://archive.org/download/"+id+"/"+zipName)
+	}
+	return func(name string) ([]byte, error) {
+		query := url.Values{"archive": {item.Dir + "/" + zipName}, "file": {name}}
+		return fetchLimited(client, "https://"+item.Server+"/view_archive.php?"+query.Encode(), rangeZipMemberLimit)
+	}
 }

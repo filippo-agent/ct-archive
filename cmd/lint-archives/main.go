@@ -16,6 +16,7 @@ type entry struct {
 	location            string
 	torrentURL          string
 	allowMissingIssuers bool
+	logf                func(string, ...any)
 }
 
 func main() {
@@ -58,4 +59,15 @@ func lintArchive(client *http.Client, e entry) (diagnostics []string, supported 
 	default:
 		return nil, false
 	}
+}
+
+// Tests report expensive stages separately from admission-queue wait time.
+func (e entry) checkStage(name string, check func() []string) []string {
+	start := time.Now()
+	defer func() {
+		if e.logf != nil {
+			e.logf("%s: %s", name, time.Since(start).Round(time.Millisecond))
+		}
+	}()
+	return check()
 }
