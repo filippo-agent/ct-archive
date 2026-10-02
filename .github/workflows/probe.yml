@@ -1,45 +1,43 @@
-name: Diagnose IA download
-on: push
+name: IA TLS packet diagnosis
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        replicate: [1, 2]
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.4'
-      - name: Check IA endpoints with curl
-        shell: bash
+          cache: false
+      - name: Build and record environment
         run: |
-          for url in \
-            https://archive.org/download/ct_digicert_yeti2022_2/ct_digicert_yeti2022_2_archive.torrent \
-            https://dn760103.eu.archive.org/0/items/ct_digicert_yeti2022_2/ct_digicert_yeti2022_2_archive.torrent \
-            https://ia801402.us.archive.org/15/items/ct_digicert_yeti2022_2/ct_digicert_yeti2022_2_archive.torrent; do
-            echo "Checking $url"
-            curl -vL --max-time 40 -o /dev/null -w 'status=%{http_code} remote=%{remote_ip} tls=%{time_appconnect} total=%{time_total}\n' "$url" || true
-          done
-      - name: Check Go TLS variants
-        shell: bash
+          mkdir -p artifacts
+          go version | tee artifacts/environment.txt
+          go build -o /tmp/ia-probe diagnostics/probe.go
+          getent ahostsv4 dn760103.eu.archive.org | tee -a artifacts/environment.txt
+          ip addr >> artifacts/environment.txt
+          ip route >> artifacts/environment.txt
+          sudo ethtool -k eth0 >> artifacts/environment.txt || true
+      - name: Capture same-run comparisons
         run: |
-          cat > /tmp/probe.go <<'GO'
-          package main
-          import ("crypto/tls"; "fmt"; "io"; "net/http"; "time")
-          func main() {
-            for _, classic := range []bool{false,true} {
-              tr := http.DefaultTransport.(*http.Transport).Clone()
-              if classic { tr.TLSClientConfig = &tls.Config{CurvePreferences: []tls.CurveID{tls.X25519,tls.CurveP256}} }
-              c := &http.Client{Transport:tr,Timeout:40*time.Second}
-              for _, url := range []string{
-                "https://dn760103.eu.archive.org/0/items/ct_digicert_yeti2022_2/ct_digicert_yeti2022_2_archive.torrent",
-                "https://ia801402.us.archive.org/15/items/ct_digicert_yeti2022_2/ct_digicert_yeti2022_2_archive.torrent",
-              } {
-                start := time.Now()
-                resp, err := c.Get(url)
-                if err != nil { fmt.Printf("classic=%v url=%s elapsed=%v error=%v\n",classic,url,time.Since(start),err); continue }
-                n,err := io.Copy(io.Discard,resp.Body); resp.Body.Close()
-                fmt.Printf("classic=%v url=%s elapsed=%v status=%v bytes=%v error=%v\n",classic,url,time.Since(start),resp.Status,n,err)
-              }
-              tr.CloseIdleConnections()
-            }
-          }
-          GO
-          GODEBUG=tlsmlkem=0 go run /tmp/probe.go
+          IP=$(getent ahostsv4 dn760103.eu.archive.org | awk 'NR==1 {print $1}')
+          echo "Pin $IP" | tee -a artifacts/environment.txt
+          sudo tcpdump -i any -nn -s 0 -U -w "$PWD/artifacts/ia.pcap" "host $IP and tcp port 443" -Z root > artifacts/tcpdump.txt 2>&1 &
+          CAPTURE=$!
+          trap 'sudo kill -INT "$CAPTURE"; wait "$CAPTURE" || true; sudo chmod -R a+r artifacts' EXIT
+          sleep 1
+          GODEBUG= /tmp/ia-probe -ip "$IP" -rounds 2 | tee artifacts/stdout.txt
+          GODEBUG=tlsmlkem=0 /tmp/ia-probe -ip "$IP" -rounds 1 -modes full-default -out artifacts/godebug | tee artifacts/godebug.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia-tls-${{ matrix.replicate }}
+          path: artifacts/
+          retention-days: 14
