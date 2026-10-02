@@ -16,6 +16,7 @@ p.add_argument("--ip", default="145.116.0.213")
 p.add_argument("--sizes", default="1436,1437,1440,1441,1447,1448,1529")
 p.add_argument("--out", default="artifacts/tcp-repro.jsonl")
 p.add_argument("--rounds", type=int, default=2)
+p.add_argument("--no-df", action="store_true", help="Linux IP_MTU_DISCOVER=IP_PMTUDISC_DONT")
 a = p.parse_args()
 pathlib.Path(a.out).parent.mkdir(parents=True, exist_ok=True)
 with open(a.out, "w") as output:
@@ -28,9 +29,12 @@ with open(a.out, "w") as output:
             data = prefix + b"a" * (n - len(prefix) - 4) + b"\r\n\r\n"
             assert len(data) == n
             s = socket.socket()
+            if a.no_df:
+                # Linux UAPI: IP_MTU_DISCOVER=10; IP_PMTUDISC_DONT=0.
+                s.setsockopt(socket.IPPROTO_IP, 10, 0)
             s.settimeout(3)
             t = time.time()
-            r = {"round": round, "size": n, "start_unix": t}
+            r = {"round": round, "size": n, "start_unix": t, "no_df": a.no_df}
             try:
                 s.connect((a.ip, 443))
                 r["local"] = "%s:%d" % s.getsockname()
