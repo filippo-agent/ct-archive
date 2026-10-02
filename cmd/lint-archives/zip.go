@@ -18,15 +18,15 @@ var errRangeUnsupported = errors.New("HTTP Range requests are unsupported")
 const (
 	rangeZipWindowSize  = 1 << 20
 	rangeZipFetchLimit  = 64 << 20
-	rangeZipMemberLimit = 1 << 20
+	rangeZipMemberLimit = 16 << 20
 )
 
 var rangeZipContentRange = regexp.MustCompile(`^bytes ([0-9]+)-([0-9]+)/([0-9]+)$`)
 
-// rangeZipFiles probes Range support before using archive/zip. Only an initial
+// openRangeZip probes Range support before using archive/zip. Only an initial
 // 200 permits the caller to fall back; it is closed without reading its body.
 // The caller owns the client's timeout and transport.
-func rangeZipFiles(client *http.Client, url string) (fileReader, error) {
+func openRangeZip(client *http.Client, url string) (*zip.Reader, error) {
 	r := &rangeZipReaderAt{client: client, url: url, readAhead: true, windows: make(map[int64][]byte)}
 	if _, err := r.fetchRange(0, 1, true); err != nil {
 		return nil, err
@@ -39,6 +39,10 @@ func rangeZipFiles(client *http.Client, url string) (fileReader, error) {
 	// what archive/zip needs, without fetching unrelated member payloads.
 	// This flag is finalized before publishing the reader to concurrent callers.
 	r.readAhead = false
+	return z, nil
+}
+
+func smallZipFiles(z *zip.Reader) fileReader {
 	return func(name string) ([]byte, error) {
 		for _, f := range z.File {
 			if f.Name != name {
@@ -74,7 +78,7 @@ func rangeZipFiles(client *http.Client, url string) (fileReader, error) {
 			return data, nil
 		}
 		return nil, fmt.Errorf("ZIP member %q: %w", name, fs.ErrNotExist)
-	}, nil
+	}
 }
 
 // Cached windows bound both network traffic and memory. Holding mu during fetches

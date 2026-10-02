@@ -33,8 +33,9 @@ func TestArchives(t *testing.T) {
 			continue
 		}
 		e := entry{
-			origin:   origin,
-			location: strings.TrimSuffix(strings.TrimSpace(cells[2]), " †"),
+			origin:              origin,
+			allowMissingIssuers: strings.HasSuffix(strings.TrimSpace(cells[2]), " †"),
+			location:            strings.TrimSuffix(strings.TrimSpace(cells[2]), " †"),
 		}
 		if match := torrentLink.FindStringSubmatch(cells[3]); match != nil {
 			e.torrentURL = match[1]

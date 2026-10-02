@@ -12,20 +12,22 @@ import (
 )
 
 type entry struct {
-	origin     string
-	location   string
-	torrentURL string
+	origin              string
+	location            string
+	torrentURL          string
+	allowMissingIssuers bool
 }
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: lint-archives -origin ORIGIN -url URL [-torrent URL]")
+		fmt.Fprintln(os.Stderr, "Usage: lint-archives -origin ORIGIN -url URL [-torrent URL] [-allow-missing-issuers]")
 		flag.PrintDefaults()
 	}
 	var e entry
 	flag.StringVar(&e.origin, "origin", "", "log origin")
 	flag.StringVar(&e.location, "url", "", "archive URL or space-separated URLs")
 	flag.StringVar(&e.torrentURL, "torrent", "", "torrent URL (optional)")
+	flag.BoolVar(&e.allowMissingIssuers, "allow-missing-issuers", false, "allow documented legacy archives without issuer certificates")
 	flag.Parse()
 	if flag.NArg() != 0 || e.origin == "" || e.location == "" {
 		flag.Usage()
