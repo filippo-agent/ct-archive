@@ -4,7 +4,6 @@
 import argparse
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,17 +27,17 @@ def extract_entries(content: str) -> list[tuple[str, str, str | None]]:
     return entries
 
 
-def lint_entries(binary: Path, entries: list[tuple[str, str, str | None]]) -> bool:
+def lint_entries(entries: list[tuple[str, str, str | None]]) -> bool:
     print(f"Found {len(entries)} archive entries", flush=True)
     passed = True
     for origin, location, torrent in entries:
         if "https://" not in location and "http://" not in location:
             print(f"SKIP: {origin}: no archive URL ({location})", flush=True)
             continue
-        command = [str(binary), "-origin", origin, "-url", location]
+        command = ["go", "run", "./cmd/lint-archives", "-origin", origin, "-url", location]
         if torrent:
             command += ["-torrent", torrent]
-        if subprocess.run(command).returncode != 0:
+        if subprocess.run(command, cwd=ROOT).returncode != 0:
             passed = False
     print("All checks passed!" if passed else "Linting failed!", flush=True)
     return passed
@@ -49,14 +48,7 @@ def main() -> int:
     parser.add_argument("--readme", type=Path, default=ROOT / "README.md")
     args = parser.parse_args()
     entries = extract_entries(args.readme.read_text())
-    # Build once, rather than running go run separately for every table row.
-    with tempfile.TemporaryDirectory(prefix="lint-archives-") as directory:
-        binary = Path(directory) / "lint-archives"
-        subprocess.run(
-            ["go", "build", "-o", str(binary), "./cmd/lint-archives"],
-            cwd=ROOT, check=True,
-        )
-        return 0 if lint_entries(binary, entries) else 1
+    return 0 if lint_entries(entries) else 1
 
 
 if __name__ == "__main__":

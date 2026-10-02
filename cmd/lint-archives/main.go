@@ -5,7 +5,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -18,44 +17,31 @@ type entry struct {
 	torrentURL string
 }
 
-func run(client *http.Client, args []string, out io.Writer) int {
-	flags := flag.NewFlagSet("lint-archives", flag.ContinueOnError)
-	flags.SetOutput(out)
+func main() {
 	var e entry
-	flags.StringVar(&e.origin, "origin", "", "log origin (required)")
-	flags.StringVar(&e.location, "url", "", "archive URL (required; quote space-separated URLs for split IA items)")
-	flags.StringVar(&e.torrentURL, "torrent", "", "torrent URL (optional; for the base item of a split IA archive)")
-	if err := flags.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return 0
-		}
-		return 2
+	flag.StringVar(&e.origin, "origin", "", "log origin (required)")
+	flag.StringVar(&e.location, "url", "", "archive URL (required; quote space-separated URLs for split IA items)")
+	flag.StringVar(&e.torrentURL, "torrent", "", "torrent URL (optional; for the base item of a split IA archive)")
+	flag.Parse()
+	if flag.NArg() != 0 || e.origin == "" || e.location == "" {
+		flag.Usage()
+		os.Exit(2)
 	}
-	if flags.NArg() != 0 || e.origin == "" || e.location == "" {
-		fmt.Fprintln(out, "Usage: lint-archives -origin ORIGIN -url URL [-torrent URL]")
-		flags.PrintDefaults()
-		return 2
-	}
-	fmt.Fprintf(out, "Linting %s (%s)...\n", e.location, e.origin)
+	fmt.Printf("Linting %s (%s)...\n", e.location, e.origin)
 	var errors []string
 	switch {
 	// Match anywhere so malformed formatting around IA links still gets checked.
 	case strings.Contains(e.location, "https://archive.org/details/"):
-		errors = lintIA(client, e)
+		errors = lintIA(&http.Client{Timeout: 30 * time.Second}, e)
 	default:
-		fmt.Fprintln(out, "  SKIP: archive location not yet supported")
-		return 0
+		fmt.Println("  SKIP: archive location not yet supported")
+		return
 	}
 	for _, err := range errors {
-		fmt.Fprintf(out, "  ERROR: %s\n", err)
+		fmt.Printf("  ERROR: %s\n", err)
 	}
 	if len(errors) != 0 {
-		return 1
+		os.Exit(1)
 	}
-	fmt.Fprintln(out, "  OK")
-	return 0
-}
-
-func main() {
-	os.Exit(run(&http.Client{Timeout: 30 * time.Second}, os.Args[1:], os.Stdout))
+	fmt.Println("  OK")
 }
