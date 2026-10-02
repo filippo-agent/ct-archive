@@ -16,6 +16,7 @@ import (
 	"time"
 )
 
+var suite = flag.String("suite", "initial", "initial or network")
 var host = flag.String("host", "dn760103.eu.archive.org", "TLS hostname")
 var ip = flag.String("ip", "", "pinned destination IP")
 var rounds = flag.Int("rounds", 2, "rounds")
@@ -141,6 +142,10 @@ func main() {
 		}
 	}
 	fmt.Printf("go=%s host=%s ip=%s GODEBUG=%s\n", runtime.Version(), *host, *ip, os.Getenv("GODEBUG"))
+	if *suite == "network" {
+		networkSuite()
+		return
+	}
 	for r := 0; r < *rounds; r++ {
 		def, cl := hello(false), hello(true)
 		os.WriteFile(filepath.Join(*out, fmt.Sprintf("hello-default-%d.bin", r)), def, 0644)
