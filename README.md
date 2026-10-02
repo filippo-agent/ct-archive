@@ -176,6 +176,18 @@ instructions below or fix the archives with `zip -F` before uploading them.*
 The log is read from the working directory, and zip files are created in the
 `archive/` subdirectory. All entries are verified against the checkpoint.
 
+### Linting the Archive Directory
+
+From the repository root, run:
+
+    go run ./cmd/lint-archives
+
+Use `-readme PATH` to check a different README. The command currently checks
+Internet Archive metadata, split-item naming and zip counts, embedded
+`log.v3.json` and checkpoint fields, and torrent completeness. Other archive
+locations are reported as skipped. It does not yet verify tile hashes,
+checkpoint signatures, or inclusion proofs.
+
 ### Uploading Archives to the Internet Archive
 
 If the log operator doesn't have the resources to host them long-term, the zip
