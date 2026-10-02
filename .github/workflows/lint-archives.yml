@@ -22,4 +22,7 @@ jobs:
           python-version: '3.12'
 
       - name: Lint archive entries
+        env:
+          # IA's EU download endpoint can stall with ML-KEM on GitHub runners.
+          GODEBUG: tlsmlkem=0
         run: python .github/scripts/lint_archives.py
