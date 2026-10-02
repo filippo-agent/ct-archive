@@ -6,20 +6,21 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Try hop localization from macOS runner
+      - name: Locate cutoff using fixed-flow TTL controls
         shell: bash
         run: |
           mkdir -p evidence
+          python3 -m venv /tmp/ia-venv
+          /tmp/ia-venv/bin/pip -q install scapy
           { date -u; uname -a; ifconfig; netstat -rn; } > evidence/environment.txt
           curl -4fsS --max-time 10 https://api.ipify.org > evidence/egress-ip.txt || true
           dev=$(route -n get 145.116.0.213 | awk '/interface:/{print $2}')
-          sudo sh -c 'echo $$ > evidence/tcpdump.pid; exec tcpdump -i "$1" -s 0 -U -w evidence/locate.pcap "(host 145.116.0.213) or icmp"' sh "$dev" > evidence/tcpdump.log 2>&1 &
+          sudo sh -c 'echo $$ > evidence/tcpdump.pid; exec tcpdump -i "$1" -s 0 -U -w evidence/fixed-flow.pcap "(host 145.116.0.213) or icmp"' sh "$dev" > evidence/tcpdump.log 2>&1 &
           trap 'sudo kill -INT "$(cat evidence/tcpdump.pid)" || true; sleep 1; sudo kill -TERM "$(cat evidence/tcpdump.pid)" 2>/dev/null || true' EXIT
           sleep 1
-          sudo python3 -u diagnostics/locate.py --wait .5 | tee evidence/locate.jsonl
-          traceroute -n -m 26 -w 1 -q 1 145.116.0.213 > evidence/traceroute.txt 2>&1 || true
+          sudo /tmp/ia-venv/bin/python -u diagnostics/fixed-flow.py --iface "$dev" | tee evidence/fixed-flow.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ia-mac-locate
+          name: ia-fixed-flow
           path: evidence/
