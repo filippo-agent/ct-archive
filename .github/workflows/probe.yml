@@ -42,4 +42,4 @@ jobs:
             }
           }
           GO
-          go run /tmp/probe.go
+          GODEBUG=tlsmlkem=0 go run /tmp/probe.go
