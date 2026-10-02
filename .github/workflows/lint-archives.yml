@@ -1,0 +1,23 @@
+name: Lint Archive Entries
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Lint archive entries
+        env:
+          # IA's EU download endpoint can stall with ML-KEM on GitHub runners.
+          GODEBUG: tlsmlkem=0
+        run: go test -v -count=1 -parallel=8 ./cmd/lint-archives
