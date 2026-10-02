@@ -205,52 +205,14 @@ func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, torr
 				firstZip = "000.zip"
 			}
 			baseURL := "https://archive.org/download/" + id + "/" + firstZip
-			logJSON, err := fetchLogInfo(client, baseURL+"/log.v3.json")
-			if err != nil {
-				errors = append(errors, err.Error())
-			} else {
-				actualID := "None"
-				if logJSON.LogID != nil {
-					actualID = *logJSON.LogID
-				}
-				if logID != "" && (logJSON.LogID == nil || *logJSON.LogID != logID) {
-					errors = append(errors, fmt.Sprintf(
-						"log.v3.json log_id '%s' does not match metadata ctlogid '%s'", actualID, logID))
-				}
-				if ctURL != "" {
-					if actual, expected := strings.TrimRight(logJSON.URL, "/"), strings.TrimRight(ctURL, "/"); actual != expected {
-						errors = append(errors, fmt.Sprintf(
-							"log.v3.json url '%s' does not match metadata cturl '%s'", actual, expected))
-					}
-				} else {
-					if actual, expected := strings.TrimRight(logJSON.SubmissionURL, "/"), strings.TrimRight(submissionURL, "/"); submissionURL != "" && actual != expected {
-						errors = append(errors, fmt.Sprintf(
-							"log.v3.json submission_url '%s' does not match metadata ctsubmissionurl '%s'", actual, expected))
-					}
-					if actual, expected := strings.TrimRight(logJSON.MonitoringURL, "/"), strings.TrimRight(monitoringURL, "/"); monitoringURL != "" && actual != expected {
-						errors = append(errors, fmt.Sprintf(
-							"log.v3.json monitoring_url '%s' does not match metadata ctmonitoringurl '%s'", actual, expected))
-					}
-				}
+			expected := logInfo{
+				LogID: &logID, URL: ctURL, SubmissionURL: submissionURL, MonitoringURL: monitoringURL,
 			}
-			checkpoint, err := fetchCheckpoint(client, baseURL+"/checkpoint")
-			if err != nil {
-				errors = append(errors, err.Error())
-			} else {
-				originURL := submissionURL
-				if originURL == "" {
-					originURL = ctURL
-				}
-				expectedOrigin := originFromURL(originURL)
-				if originURL != "" && checkpoint.Origin != expectedOrigin {
-					errors = append(errors, fmt.Sprintf(
-						"checkpoint origin '%s' does not match URL metadata '%s'", checkpoint.Origin, expectedOrigin))
-				}
-				if present && sizeErr == nil && logSize != 0 && checkpoint.Size != logSize {
-					errors = append(errors, fmt.Sprintf(
-						"checkpoint size %d does not match ctlogsize %d", checkpoint.Size, logSize))
-				}
+			var expectedSize *int64
+			if present && sizeErr == nil && logSize != 0 {
+				expectedSize = &logSize
 			}
+			errors = append(errors, lintMetadata(httpFiles(client, baseURL), expected, expectedSize)...)
 		}
 	}
 

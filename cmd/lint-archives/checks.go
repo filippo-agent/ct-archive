@@ -13,6 +13,17 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 )
 
+// fileReader fetches a small file by name, independent of how it is served.
+type fileReader func(name string) ([]byte, error)
+
+// httpFiles handles both direct prefixes and IA's ZIP-member extraction URLs.
+func httpFiles(client *http.Client, prefix string) fileReader {
+	prefix = strings.TrimRight(prefix, "/") + "/"
+	return func(name string) ([]byte, error) {
+		return fetch(client, prefix+name)
+	}
+}
+
 type logInfo struct {
 	LogID         *string `json:"log_id"`
 	URL           string  `json:"url"`
@@ -25,9 +36,9 @@ type checkpoint struct {
 	Size   int64
 }
 
-func fetchLogInfo(client *http.Client, url string) (logInfo, error) {
+func fetchLogInfo(read fileReader) (logInfo, error) {
 	var info logInfo
-	data, err := fetch(client, url)
+	data, err := read("log.v3.json")
 	if err != nil {
 		return info, fmt.Errorf("Failed to fetch log.v3.json: %w", err)
 	}
@@ -40,8 +51,8 @@ func fetchLogInfo(client *http.Client, url string) (logInfo, error) {
 	return info, nil
 }
 
-func fetchCheckpoint(client *http.Client, url string) (checkpoint, error) {
-	data, err := fetch(client, url)
+func fetchCheckpoint(read fileReader) (checkpoint, error) {
+	data, err := read("checkpoint")
 	if err != nil {
 		return checkpoint{}, fmt.Errorf("Failed to fetch checkpoint: %w", err)
 	}
@@ -55,6 +66,61 @@ func fetchCheckpoint(client *http.Client, url string) (checkpoint, error) {
 	}
 	// Root hash and signature verification are deferred; see TODO.md.
 	return checkpoint{Origin: lines[0], Size: size}, nil
+}
+
+// lintMetadata applies the same checks to IA-extracted and Range-read ZIP
+// members. Expected values come from IA metadata or the standalone files.
+func lintMetadata(read fileReader, expected logInfo, expectedSize *int64) []string {
+	var errors []string
+	info, err := fetchLogInfo(read)
+	if err != nil {
+		errors = append(errors, err.Error())
+	} else {
+		if expected.LogID != nil && *expected.LogID != "" {
+			actualID := "None"
+			if info.LogID != nil {
+				actualID = *info.LogID
+			}
+			if info.LogID == nil || actualID != *expected.LogID {
+				errors = append(errors, fmt.Sprintf(
+					"log.v3.json log_id '%s' does not match expected log_id '%s'", actualID, *expected.LogID))
+			}
+		}
+		checkURL := func(field, actual, expected string) {
+			if expected == "" {
+				return
+			}
+			actual, expected = strings.TrimRight(actual, "/"), strings.TrimRight(expected, "/")
+			if actual != expected {
+				errors = append(errors, fmt.Sprintf(
+					"log.v3.json %s '%s' does not match expected %s '%s'", field, actual, field, expected))
+			}
+		}
+		if expected.URL != "" {
+			checkURL("url", info.URL, expected.URL)
+		} else {
+			checkURL("submission_url", info.SubmissionURL, expected.SubmissionURL)
+			checkURL("monitoring_url", info.MonitoringURL, expected.MonitoringURL)
+		}
+	}
+	checkpoint, err := fetchCheckpoint(read)
+	if err != nil {
+		errors = append(errors, err.Error())
+	} else {
+		originURL := expected.SubmissionURL
+		if originURL == "" {
+			originURL = expected.URL
+		}
+		if originURL != "" && checkpoint.Origin != originFromURL(originURL) {
+			errors = append(errors, fmt.Sprintf(
+				"checkpoint origin '%s' does not match expected origin '%s'", checkpoint.Origin, originFromURL(originURL)))
+		}
+		if expectedSize != nil && checkpoint.Size != *expectedSize {
+			errors = append(errors, fmt.Sprintf(
+				"checkpoint size %d does not match expected size %d", checkpoint.Size, *expectedSize))
+		}
+	}
+	return errors
 }
 
 func originFromURL(url string) string {

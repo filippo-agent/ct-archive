@@ -1,6 +1,15 @@
-# Deferred archive checks
+# Archive check backlog
 
-This is the backlog for later PRs, not checks performed by the current linter.
+## Implemented
+
+- [x] Read small ZIP members through IA extraction URLs or bounded HTTP Range
+  requests, using the same metadata checks. Require valid partial responses;
+  never consume a full ZIP response if the server ignores Range.
+- [x] Compare log metadata and checkpoint origin/size inside the first ZIP with
+  the standalone files on prefix hosts. Hosts without Range support retain
+  standalone-file and HEAD availability checks.
+
+## Deferred to later PRs
 
 - [ ] Compare the README/CLI origin label with the archive's checkpoint and log
   metadata.
@@ -8,11 +17,8 @@ This is the backlog for later PRs, not checks performed by the current linter.
   and, where available, independently trusted log information.
 - [ ] Parse the full checkpoint (including its root hash) and verify its signature
   with the log public key. Establish trust in that key separately.
-- [ ] Read selected ZIP members using bounded HTTP Range requests. Require valid
-  partial responses; never consume a full ZIP if the server ignores Range.
-  Keep HEAD-only availability checks for hosts without Range support.
-- [ ] Compare metadata and checkpoints inside sampled ZIPs with the standalone
-  files and with other archive parts.
+- [ ] Extend metadata comparisons to other ZIPs/parts and full checkpoint
+  contents, not only the origin and tree size.
 - [ ] Sample a random data tile, recompute its leaf hashes, and compare them with
   the corresponding hash tile. Handle RFC 6962 archival leaves and partial tiles.
 - [ ] Verify the sampled data's inclusion in the checkpoint root using the

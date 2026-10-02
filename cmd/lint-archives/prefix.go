@@ -16,7 +16,7 @@ func lintPrefix(client *http.Client, e entry) []string {
 	}
 	baseURL := strings.TrimRight(e.location, "/") + "/"
 	var errors []string
-	info, infoErr := fetchLogInfo(client, baseURL+"log.v3.json")
+	info, infoErr := fetchLogInfo(httpFiles(client, baseURL))
 	if infoErr != nil {
 		errors = append(errors, infoErr.Error())
 	} else {
@@ -27,7 +27,7 @@ func lintPrefix(client *http.Client, e entry) []string {
 			errors = append(errors, "Missing URLs in log.v3.json: expected either url or both submission_url and monitoring_url")
 		}
 	}
-	checkpoint, err := fetchCheckpoint(client, baseURL+"checkpoint")
+	checkpoint, err := fetchCheckpoint(httpFiles(client, baseURL))
 	if err != nil {
 		// Without a tree size we cannot determine the expected ZIP inventory.
 		return append(errors, err.Error())
@@ -55,6 +55,21 @@ func lintPrefix(client *http.Client, e entry) []string {
 		zips = append(zips, name)
 		if err := headZip(client, baseURL+name); err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+	if n > 0 {
+		// Sample the first ZIP, just as for an IA base item. A server ignoring
+		// Range leaves the standalone-file and HEAD checks in place.
+		read, err := rangeZipFiles(client, baseURL+"000.zip")
+		switch {
+		case err == errRangeUnsupported:
+			// No full-ZIP download fallback.
+		case err != nil:
+			errors = append(errors, fmt.Sprintf("000.zip: %v", err))
+		default:
+			for _, diagnostic := range lintMetadata(read, info, &checkpoint.Size) {
+				errors = append(errors, "000.zip: "+diagnostic)
+			}
 		}
 	}
 	// There is no directory listing: check required ZIPs, not absence of extras.
