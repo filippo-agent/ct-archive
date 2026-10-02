@@ -64,7 +64,7 @@ func fetchCheckpoint(read fileReader) (checkpoint, error) {
 	if err != nil || size < 0 {
 		return checkpoint{}, fmt.Errorf("Invalid checkpoint size: %s", lines[1])
 	}
-	// Root hash and signature verification are deferred; see TODO.md.
+	// Root hash and signature verification are deferred.
 	return checkpoint{Origin: lines[0], Size: size}, nil
 }
 
