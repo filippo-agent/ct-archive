@@ -86,7 +86,6 @@ func TestLintIA(t *testing.T) {
 		want   string
 	}{
 		{"valid", func(f *fixture) {}, ""},
-		{"dagger", func(f *fixture) { f.entry.location += " †" }, ""},
 		{"lists", func(f *fixture) {
 			f.metadata["subject"] = []string{"other", "certificate transparency log"}
 			f.metadata["collection"] = []string{"other", "datasets_unsorted"}
@@ -154,7 +153,7 @@ func TestLintIA(t *testing.T) {
 func TestLintIASplit(t *testing.T) {
 	f := newFixture()
 	f.entry.location += " https://archive.org/details/base_ext1"
-	f.entry.hasTorrent = true
+	f.entry.torrentURL = "https://archive.org/download/base/base_archive.torrent"
 	f.metadata["ctlogsize"] = "16777217"
 	f.checkpoint = "log.example/log\n16777217\n"
 	f.responses["/metadata/base_ext1"] = jsonText(map[string]any{"metadata": f.metadata, "files": []map[string]string{{"name": "001.zip", "source": "original"}}})
@@ -184,7 +183,9 @@ func TestLintIATorrent(t *testing.T) {
 	for _, mode := range []string{"single", "multi", "missing", "invalid", "HTTP", "skip"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newFixture()
-			f.entry.hasTorrent = mode != "skip"
+			if mode != "skip" {
+				f.entry.torrentURL = "https://archive.org/download/base/base_archive.torrent"
+			}
 			f.files = append(f.files, map[string]string{"name": "base_files.xml", "source": "original"}, map[string]string{"name": "derived.txt", "source": "derivative"})
 			switch mode {
 			case "single", "skip":

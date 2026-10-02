@@ -68,7 +68,7 @@ type iaMetadata struct {
 	LogSize       json.RawMessage `json:"ctlogsize"`
 }
 
-// lintIA checks an entire README entry, including its extension items. The
+// lintIA checks an archive, including its extension items. The
 // caller owns the client's timeout and transport; every request uses it.
 func lintIA(client *http.Client, e entry) []string {
 	matches := iaIDPattern.FindAllStringSubmatch(e.location, -1)
@@ -84,7 +84,7 @@ func lintIA(client *http.Client, e entry) []string {
 
 	var errors []string
 	expectedLocation := strings.Join(locations, " ")
-	if strings.TrimSuffix(e.location, " †") != expectedLocation {
+	if e.location != expectedLocation {
 		errors = append(errors, fmt.Sprintf("Archive location should be '%s'", expectedLocation))
 	}
 	expectedExtensions := make([]string, len(ids)-1)
@@ -121,14 +121,18 @@ func lintIA(client *http.Client, e entry) []string {
 			errors = append(errors, fmt.Sprintf("%s: %v", id, fetchErrors[i]))
 			continue
 		}
-		for _, diagnostic := range lintIAPart(client, id, items[i], totalZips, e.hasTorrent && id == ids[0]) {
+		torrentURL := ""
+		if i == 0 {
+			torrentURL = e.torrentURL
+		}
+		for _, diagnostic := range lintIAPart(client, id, items[i], totalZips, torrentURL) {
 			errors = append(errors, id+": "+diagnostic)
 		}
 	}
 	return errors
 }
 
-func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, hasTorrent bool) []string {
+func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, torrentURL string) []string {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(item.Metadata, &fields); err != nil && len(item.Metadata) != 0 {
 		return []string{fmt.Sprintf("Invalid JSON in metadata: %v", err)}
@@ -279,8 +283,8 @@ func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, hasT
 		}
 	}
 
-	if hasTorrent {
-		data, err := iaFetch(client, "https://archive.org/download/"+id+"/"+id+"_archive.torrent")
+	if torrentURL != "" {
+		data, err := iaFetch(client, torrentURL)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("Failed to fetch torrent: %v", err))
 		} else if files, err := iaTorrentFiles(data); err != nil {

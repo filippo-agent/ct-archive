@@ -178,12 +178,25 @@ The log is read from the working directory, and zip files are created in the
 
 ### Linting the Archive Directory
 
-From the repository root, run:
+To check an individual upload, run:
 
-    go run ./cmd/lint-archives
+    go run ./cmd/lint-archives \
+        -origin ct.cloudflare.com/logs/nimbus2022 \
+        -url https://archive.org/details/ct_cloudflare_nimbus2022 \
+        -torrent https://archive.org/download/ct_cloudflare_nimbus2022/ct_cloudflare_nimbus2022_archive.torrent
 
-Use `-readme PATH` to check a different README. The command currently checks
-Internet Archive metadata, split-item naming and zip counts, embedded
+The `-torrent` URL is optional. For split IA archives, pass all item URLs in
+order as a single quoted, space-separated `-url` argument; the torrent, if
+provided, is checked against the base item. The command can also be installed
+with `go install ./cmd/lint-archives` and run independently of this repository.
+
+To check the full directory, run `python3 .github/scripts/lint_archives.py`.
+This wrapper builds the Go command once, parses the README table, and checks
+each entry, continuing after failures. Use `--readme PATH` to check a different
+README.
+
+The command currently checks Internet Archive metadata, split-item naming and
+zip counts, embedded
 `log.v3.json` and checkpoint fields, and torrent completeness. Other archive
 locations are reported as skipped. It does not yet verify tile hashes,
 checkpoint signatures, or inclusion proofs.
