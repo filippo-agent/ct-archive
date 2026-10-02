@@ -2,25 +2,33 @@ name: IA TLS packet isolation
 on: push
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Localize packet-size loss with established TCP TTL probes
+      - name: Compare destinations and runner networks
         shell: bash
         run: |
           mkdir -p evidence
-          ip=$(getent ahostsv4 dn760103.eu.archive.org | awk 'NR==1{print $1}')
-          { date -u; uname -a; ip addr; ip route; ip route get "$ip"; } > evidence/environment.txt
-          sudo ethtool -K eth0 tso off gso off gro off
-          for iface in /sys/class/net/eth0/lower_*; do sudo ethtool -K "${iface##*lower_}" tso off gso off gro off || true; done
-          sudo tcpdump -i eth0 -s 0 -U -w evidence/locate.pcap "(host $ip and tcp) or icmp" > evidence/tcpdump.log 2>&1 &
+          { date -u; uname -a; ifconfig || true; netstat -rn; } > evidence/environment.txt
+          if [[ $(uname) == Linux ]]; then
+            sudo ethtool -K eth0 tso off gso off gro off || true
+            for iface in /sys/class/net/eth0/lower_*; do sudo ethtool -K "${iface##*lower_}" tso off gso off gro off || true; done
+            dev=eth0
+          else
+            dev=$(route -n get 145.116.0.213 | awk '/interface:/{print $2}')
+          fi
+          filter=$(python3 diagnostics/destinations.py --filter)
+          sudo tcpdump -i "$dev" -s 0 -U -w evidence/destinations.pcap "$filter" > evidence/tcpdump.log 2>&1 &
           cap=$!
           trap 'sudo kill -INT "$cap" || true; wait "$cap" || true' EXIT
           sleep 1
-          sudo python3 diagnostics/locate.py --ip "$ip" | tee evidence/locate.jsonl
+          python3 diagnostics/destinations.py | tee evidence/destinations.jsonl
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ia-locate
+          name: ia-destinations-${{ matrix.os }}
           path: evidence/
