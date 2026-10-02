@@ -18,30 +18,34 @@ type entry struct {
 }
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: lint-archives -origin ORIGIN -url URL [-torrent URL]")
+		flag.PrintDefaults()
+	}
 	var e entry
-	flag.StringVar(&e.origin, "origin", "", "log origin (required)")
-	flag.StringVar(&e.location, "url", "", "archive URL (required; quote space-separated URLs for split IA items)")
-	flag.StringVar(&e.torrentURL, "torrent", "", "torrent URL (optional; for the base item of a split IA archive)")
+	flag.StringVar(&e.origin, "origin", "", "log origin")
+	flag.StringVar(&e.location, "url", "", "archive URL or space-separated URLs")
+	flag.StringVar(&e.torrentURL, "torrent", "", "torrent URL (optional)")
 	flag.Parse()
 	if flag.NArg() != 0 || e.origin == "" || e.location == "" {
 		flag.Usage()
 		os.Exit(2)
 	}
-	fmt.Printf("Linting %s (%s)...\n", e.location, e.origin)
 	var errors []string
 	switch {
 	// Match anywhere so malformed formatting around IA links still gets checked.
 	case strings.Contains(e.location, "https://archive.org/details/"):
 		errors = lintIA(&http.Client{Timeout: 30 * time.Second}, e)
 	default:
-		fmt.Println("  SKIP: archive location not yet supported")
+		fmt.Printf("SKIP %s: archive host not yet supported\n", e.origin)
 		return
 	}
-	for _, err := range errors {
-		fmt.Printf("  ERROR: %s\n", err)
-	}
 	if len(errors) != 0 {
+		fmt.Printf("FAIL %s\n", e.origin)
+		for _, err := range errors {
+			fmt.Printf("  %s\n", err)
+		}
 		os.Exit(1)
 	}
-	fmt.Println("  OK")
+	fmt.Printf("OK   %s\n", e.origin)
 }

@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 )
@@ -122,6 +125,7 @@ func lintIA(client *http.Client, e entry) []string {
 			continue
 		}
 		torrentURL := ""
+		// IA's torrent covers only the base item, not its extension items.
 		if i == 0 {
 			torrentURL = e.torrentURL
 		}
@@ -315,6 +319,19 @@ func lintIAPart(client *http.Client, id string, item iaItem, totalZips int, torr
 }
 
 func iaFetch(client *http.Client, url string) ([]byte, error) {
+	// Retry timeouts, including TLS handshake timeouts on IA's download servers.
+	// Do not retry HTTP errors or validation failures.
+	for attempt := 0; ; attempt++ {
+		data, err := iaFetchOnce(client, url)
+		var timeout net.Error
+		if attempt == 2 || !errors.As(err, &timeout) || !timeout.Timeout() {
+			return data, err
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func iaFetchOnce(client *http.Client, url string) ([]byte, error) {
 	response, err := client.Get(url)
 	if err != nil {
 		return nil, err
