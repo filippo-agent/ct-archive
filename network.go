@@ -19,10 +19,10 @@ func networkSuite() {
 		post       bool
 	}
 	vs := []variant{}
-	for _, n := range []int{1200, 1300, 1350, 1400, 1420, 1430, 1440, 1448, 1449, 1500, 1529} {
+	for _, n := range []int{1430, 1431, 1432, 1433, 1434, 1435, 1436, 1437, 1438, 1439, 1440} {
 		vs = append(vs, variant{name: fmt.Sprintf("pad%d", n), raw: padded(cl, n)})
 	}
-	for _, n := range []int{1300, 1400, 1420, 1440, 1460} {
+	for _, n := range []int{1444, 1448, 1450, 1452, 1460} {
 		vs = append(vs, variant{name: fmt.Sprintf("default-mss%d", n), mss: n})
 	}
 	vs = append(vs, variant{name: "post-classic-large", post: true}, variant{name: "post-classic-large-split", post: true, split: 600})
@@ -53,6 +53,7 @@ func networkSuite() {
 			cfg := config(v.post)
 			if v.post {
 				cfg.NextProtos = []string{"http/1.1"}
+				cfg.DynamicRecordSizingDisabled = true
 			}
 			keys, _ := os.Create(prefix + "-keys.log")
 			cfg.KeyLogWriter = keys

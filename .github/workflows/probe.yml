@@ -3,33 +3,31 @@ on: push
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    strategy:
-      matrix:
-        trial: [1, 2]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25.4'
-      - name: Packet-size boundary and offload control
+      - name: Exact boundary and minimal reproducer
         shell: bash
         run: |
           mkdir -p evidence
           go build -o /tmp/ia-probe .
+          go build -o /tmp/ia-min ./cmd/min-repro
           ip=$(getent ahostsv4 dn760103.eu.archive.org | awk 'NR==1{print $1}')
-          us=$(getent ahostsv4 ia801402.us.archive.org | awk 'NR==1{print $1}')
-          { date -u; go version; uname -a; ip addr; ip route; ip route get "$ip"; sudo ethtool -k eth0; sysctl net.ipv4.tcp_mtu_probing; } > evidence/environment.txt
-          sudo tcpdump -i eth0 -s 0 -U -w evidence/network.pcap "(host $ip or host $us) and (tcp port 443 or icmp)" > evidence/tcpdump.log 2>&1 &
+          { date -u; go version; uname -a; ip addr; ip route; ip route get "$ip"; sysctl net.ipv4.tcp_mtu_probing; } > evidence/environment.txt
+          sudo ethtool -K eth0 tso off gso off gro off
+          sudo ethtool -k eth0 > evidence/offloads.txt
+          sudo tcpdump -i eth0 -s 0 -U -w evidence/boundary.pcap "(host $ip and tcp port 443) or icmp" > evidence/tcpdump.log 2>&1 &
           cap=$!
           trap 'sudo kill -INT "$cap" || true; wait "$cap" || true' EXIT
           sleep 1
-          /tmp/ia-probe -ip "$ip" -suite network -out evidence/offload-on | tee evidence/offload-on.log
-          { sudo ethtool -K eth0 tso off gso off gro off; sudo ethtool -k eth0; } > evidence/offload-change.txt 2>&1
-          /tmp/ia-probe -ip "$ip" -suite network -out evidence/offload-off | tee evidence/offload-off.log
-          /tmp/ia-probe -host ia801402.us.archive.org -ip "$us" -rounds 1 -out evidence/us | tee evidence/us.log
+          /tmp/ia-probe -ip "$ip" -suite network -out evidence/exact | tee evidence/exact.log
+          { /tmp/ia-min -addr "$ip:443"; /tmp/ia-min -addr "$ip:443" -mss 1400; GODEBUG=tlsmlkem=0 /tmp/ia-min -addr "$ip:443"; } | tee evidence/minimal.log
+          { ping -n -c 1 -W 2 -M do -s 1400 "$ip" || true; ping -n -c 1 -W 2 -M do -s 1472 "$ip" || true; } > evidence/ping.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ia-network-${{ matrix.trial }}
+          name: ia-exact-boundary
           path: evidence/
