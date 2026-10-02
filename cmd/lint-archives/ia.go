@@ -3,11 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-
 	"fmt"
 	"io"
 	"math"
-
 	"net/http"
 	"regexp"
 	"slices"

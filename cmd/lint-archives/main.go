@@ -31,12 +31,8 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	var errors []string
-	switch {
-	// Match anywhere so malformed formatting around IA links still gets checked.
-	case strings.Contains(e.location, "https://archive.org/details/"):
-		errors = lintIA(&http.Client{Timeout: 30 * time.Second}, e)
-	default:
+	errors, supported := lintArchive(&http.Client{Timeout: 30 * time.Second}, e)
+	if !supported {
 		fmt.Printf("SKIP %s: archive host not yet supported\n", e.origin)
 		return
 	}
@@ -48,4 +44,14 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("OK   %s\n", e.origin)
+}
+
+func lintArchive(client *http.Client, e entry) (diagnostics []string, supported bool) {
+	switch {
+	// Match anywhere so malformed formatting around IA links still gets checked.
+	case strings.Contains(e.location, "https://archive.org/details/"):
+		return lintIA(client, e), true
+	default:
+		return nil, false
+	}
 }
