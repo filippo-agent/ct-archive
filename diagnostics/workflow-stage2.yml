@@ -1,0 +1,50 @@
+name: IA TLS size boundary diagnosis
+on: [push, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        replicate: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.4'
+          cache: false
+      - name: Build and record environment
+        run: |
+          mkdir -p artifacts
+          go version | tee artifacts/environment.txt
+          go build -o /tmp/ia-probe diagnostics/probe.go
+          getent ahostsv4 dn760103.eu.archive.org | tee -a artifacts/environment.txt
+          ip addr >> artifacts/environment.txt
+          ip route >> artifacts/environment.txt
+          sudo ethtool -k eth0 >> artifacts/environment.txt || true
+      - name: Capture same-run comparisons
+        run: |
+          IP=$(getent ahostsv4 dn760103.eu.archive.org | awk 'NR==1 {print $1}')
+          echo "Pin $IP" | tee -a artifacts/environment.txt
+          sudo tcpdump -i any -nn -s 0 -U -w "$PWD/artifacts/ia.pcap" "(host $IP and tcp port 443) or (icmp and icmp[0] = 3 and icmp[1] = 4 and icmp[24:4] = 0x917400d5)" -Z root > artifacts/tcpdump.txt 2>&1 &
+          CAPTURE=$!
+          trap 'sudo kill -INT "$CAPTURE"; wait "$CAPTURE" || true; sudo chmod -R a+r artifacts' EXIT
+          sleep 1
+          GODEBUG= /tmp/ia-probe -ip "$IP" -rounds 2 -timeout 4s -modes full-default,raw-classic-pad1400,raw-classic-pad1428,raw-classic-pad1429,raw-classic-pad1448,raw-http-pad1428,raw-http-pad1429,raw-http-pad1529,full-default-mss1440,full-default-mss1441,full-default-tcpsplit | tee artifacts/stdout.txt
+          sudo ethtool -K eth0 tso off gso off gro off >> artifacts/offload-changes.txt 2>&1 || true
+          for interface in /sys/class/net/eth0/lower_*; do
+            interface=${interface##*lower_}
+            sudo ethtool -K "$interface" tso off gso off gro off >> artifacts/offload-changes.txt 2>&1 || true
+          done
+          sudo ethtool -k eth0 >> artifacts/offload-changes.txt
+          GODEBUG= /tmp/ia-probe -ip "$IP" -rounds 1 -timeout 4s -modes full-default,raw-http-pad1428,raw-http-pad1429,raw-http-pad1529,full-default-mss1440,full-default-tcpsplit -out artifacts/offload-disabled | tee artifacts/offload-disabled.txt
+          GODEBUG=tlsmlkem=0 /tmp/ia-probe -ip "$IP" -rounds 1 -modes full-default -out artifacts/godebug | tee artifacts/godebug.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ia-tls-${{ matrix.replicate }}
+          path: artifacts/
+          retention-days: 14
